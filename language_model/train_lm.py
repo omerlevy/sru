@@ -11,7 +11,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Variable
 
+import sys
+sys.path.append('../')
 import cuda_functional as MF
+from omernn import Contextualizer, Architecture
 
 
 def read_corpus(path, eos="</s>"):
@@ -63,7 +66,10 @@ class Model(nn.Module):
         self.drop = nn.Dropout(args.dropout)
         self.embedding_layer = EmbeddingLayer(self.n_d, words)
         self.n_V = self.embedding_layer.n_V
-        if args.lstm:
+        if args.omer:
+            self.architecture = Architecture(args.content, args.gates)
+            self.rnn = Contextualizer([self.n_d] * (self.depth + 1), args.rnn_dropout, args.rnn_dropout, False, self.architecture)
+        elif args.lstm:
             self.rnn = nn.LSTM(self.n_d, self.n_d,
                 self.depth,
                 dropout = args.rnn_dropout
@@ -79,7 +85,7 @@ class Model(nn.Module):
         self.output_layer.weight = self.embedding_layer.embedding.weight
 
         self.init_weights()
-        if not args.lstm:
+        if (not args.omer) and (not args.lstm):
             self.rnn.set_bias(args.bias)
 
     def init_weights(self):
@@ -99,6 +105,8 @@ class Model(nn.Module):
         return output, hidden
 
     def init_hidden(self, batch_size):
+        if self.args.omer:
+            return self.rnn.init_hidden(batch_size)
         weight = next(self.parameters()).data
         zeros = Variable(weight.new(self.depth, batch_size, self.n_d).zero_())
         if self.args.lstm:
@@ -128,8 +136,15 @@ def train_model(epoch, model, train):
         x = train[0][i*unroll_size:(i+1)*unroll_size]
         y = train[1][i*unroll_size:(i+1)*unroll_size].view(-1)
         x, y =  Variable(x), Variable(y)
-        hidden = (Variable(hidden[0].data), Variable(hidden[1].data)) if args.lstm \
-            else Variable(hidden.data)
+        if args.omer:
+            if model.architecture.dual_state():
+                hidden = [(Variable(h[0].data), Variable(h[1].data)) for h in hidden]
+            else:
+                hidden = [Variable(h.data) for h in hidden]
+        elif args.lstm:
+            hidden = (Variable(hidden[0].data), Variable(hidden[1].data))
+        else:
+            hidden = Variable(hidden.data)
 
         model.zero_grad()
         output, hidden = model(x, hidden)
@@ -155,20 +170,27 @@ def train_model(epoch, model, train):
 
     return np.exp(total_loss/N)
 
-def eval_model(model, valid):
+def eval_model(model, valid, batch_size):
     model.eval()
     args = model.args
     total_loss = 0.0
     unroll_size = model.args.unroll_size
     criterion = nn.CrossEntropyLoss(size_average=False)
-    hidden = model.init_hidden(1)
+    hidden = model.init_hidden(batch_size)
     N = (len(valid[0])-1)//unroll_size + 1
     for i in range(N):
         x = valid[0][i*unroll_size:(i+1)*unroll_size]
         y = valid[1][i*unroll_size:(i+1)*unroll_size].view(-1)
         x, y = Variable(x, volatile=True), Variable(y)
-        hidden = (Variable(hidden[0].data), Variable(hidden[1].data)) if args.lstm \
-            else Variable(hidden.data)
+        if args.omer:
+            if model.architecture.dual_state():
+                hidden = [(Variable(h[0].data), Variable(h[1].data)) for h in hidden]
+            else:
+                hidden = [Variable(h.data) for h in hidden]
+        elif args.lstm:
+            hidden = (Variable(hidden[0].data), Variable(hidden[1].data))
+        else:
+            hidden = Variable(hidden.data)
         output, hidden = model(x, hidden)
         loss = criterion(output, y)
         total_loss += loss.data[0]
@@ -180,6 +202,7 @@ def main(args):
     train = read_corpus(args.train)
     dev = read_corpus(args.dev)
     test = read_corpus(args.test)
+    final_test = read_corpus(args.test)
 
     model = Model(train, args)
     model.cuda()
@@ -194,17 +217,19 @@ def main(args):
 
     map_to_ids = model.embedding_layer.map_to_ids
     train = create_batches(train, map_to_ids, args.batch_size)
-    dev = create_batches(dev, map_to_ids, 1)
-    test = create_batches(test, map_to_ids, 1)
+    #dev = create_batches(dev, map_to_ids, 1)
+    #test = create_batches(test, map_to_ids, 1)
+    dev = create_batches(dev, map_to_ids, args.batch_size)
+    test = create_batches(test, map_to_ids, args.batch_size)
+    final_test = create_batches(final_test, map_to_ids, 1)
 
-    unchanged = 0
     best_dev = 1e+8
     for epoch in range(args.max_epoch):
         start_time = time.time()
         if args.lr_decay_epoch>0 and epoch>=args.lr_decay_epoch:
             args.lr *= args.lr_decay
         train_ppl = train_model(epoch, model, train)
-        dev_ppl = eval_model(model, dev)
+        dev_ppl = eval_model(model, dev, args.batch_size)
         sys.stdout.write("\rEpoch={}  lr={:.4f}  train_ppl={:.2f}  dev_ppl={:.2f}"
                 "\t[{:.2f}m]\n".format(
             epoch,
@@ -217,23 +242,30 @@ def main(args):
         sys.stdout.flush()
 
         if dev_ppl < best_dev:
-            unchanged = 0
             best_dev = dev_ppl
             start_time = time.time()
-            test_ppl = eval_model(model, test)
+            test_ppl = eval_model(model, test, args.batch_size)
             sys.stdout.write("\t[eval]  test_ppl={:.2f}\t[{:.2f}m]\n".format(
                 test_ppl,
                 (time.time()-start_time)/60.0
             ))
             sys.stdout.flush()
-        else:
-            unchanged += 1
-        if unchanged >= 30: break
         sys.stdout.write("\n")
+    
+    start_time = time.time()
+    test_ppl = eval_model(model, final_test, 1)
+    sys.stdout.write("\t[eval]  test_ppl={:.2f}\t[{:.2f}m]\n".format(
+        test_ppl,
+        (time.time()-start_time)/60.0
+    ))
+    sys.stdout.flush()
 
 if __name__ == "__main__":
     argparser = argparse.ArgumentParser(sys.argv[0], conflict_handler='resolve')
     argparser.add_argument("--lstm", action="store_true")
+    argparser.add_argument("--omer", action="store_true")
+    argparser.add_argument("--content", type=str)
+    argparser.add_argument("--gates", type=str)
     argparser.add_argument("--train", type=str, required=True, help="training file")
     argparser.add_argument("--dev", type=str, required=True, help="dev file")
     argparser.add_argument("--test", type=str, required=True, help="test file")
