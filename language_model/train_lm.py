@@ -68,7 +68,7 @@ class Model(nn.Module):
         self.n_V = self.embedding_layer.n_V
         if args.omer:
             self.architecture = Architecture(args.content, args.gates)
-            self.rnn = Contextualizer([self.n_d] * (self.depth + 1), args.rnn_dropout, args.rnn_dropout, False, self.architecture)
+            self.rnn = Contextualizer([self.n_d] * (self.depth + 1), args.rnn_dropout, args.rnn_dropout, False, self.architecture, False)
         elif args.lstm:
             self.rnn = nn.LSTM(self.n_d, self.n_d,
                 self.depth,
