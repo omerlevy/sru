@@ -8,13 +8,14 @@ from torch.autograd import Variable
 
 class Contextualizer(nn.Module):
     
-    def __init__(self, dims, dropout, rnn_dropout, bidirectional, architecture):
+    def __init__(self, dims, dropout, rnn_dropout, bidirectional, architecture, tanh_input):
         super(Contextualizer, self).__init__()
         self.dims = dims
         self.dropout = nn.Dropout(dropout)
-        self.rnn_dropout = rnn_dropout #TODO
+        self.rnn_dropout = nn.Dropout(rnn_dropout)
         self.bidirectional = bidirectional
         self.architecture = architecture
+        self.tanh_input = tanh_input
         if bidirectional:
             raise Exception('Not implemented yet')
             #self.cells = [(Cell(dims[layer], dims[layer+1], architecture).cuda(), Cell(dims[layer], dims[layer+1], architecture).cuda()) for layer in range(len(dims) - 1)]
@@ -23,6 +24,8 @@ class Contextualizer(nn.Module):
         
     def forward(self, inputs, states):
         inputs = inputs.cuda()
+        if self.tanh_input:
+            inputs = F.tanh(inputs)
         if self.bidirectional:
             raise Exception('Not implemented yet')
         else:
@@ -31,14 +34,17 @@ class Contextualizer(nn.Module):
                 outputs, state = self.iterate(cell, inputs, state)
                 new_states.append(state)
                 inputs = outputs
-                inputs = self.dropout(inputs)
             return outputs, new_states
     
     def iterate(self, cell, inputs, state):
+        batch_size = inputs.size()[1]
+        inputs_mask = self.rnn_dropout(Variable(torch.ones([batch_size, cell.input_size]).cuda()))
+        hidden_state_mask = self.rnn_dropout(Variable(torch.ones([batch_size, cell.hidden_size]).cuda())) 
         outputs = []
         inputs = [x.squeeze(0) for x in inputs.split(split_size=1, dim=0)]
         for x in inputs:
-            output, state = cell(x, state)
+            output_mask = self.dropout(Variable(torch.ones([batch_size, cell.hidden_size]).cuda()))
+            output, state = cell(x, state, inputs_mask, hidden_state_mask, output_mask)
             outputs.append(output)
         return torch.stack(outputs, 0), state
     
@@ -58,7 +64,6 @@ class Contextualizer(nn.Module):
 class Cell(nn.Module):
 
     def __init__(self, input_size, hidden_size, architecture):
-        #TODO dropout / rnn_dropout
         super(Cell, self).__init__()
         self.input_size = input_size
         self.hidden_size = hidden_size
@@ -96,24 +101,26 @@ class Cell(nn.Module):
             else:
                 p.data.zero_()
 
-    def forward(self, inputs, state):
-        #TODO dropout / rnn_dropout
-        
+    def forward(self, inputs, state, inputs_mask, hidden_state_mask, output_mask):
         # State
         if self.architecture.dual_state():
             hidden_state, cell_state = state
         else:
             hidden_state = cell_state = state
         
+        # RNN Dropout
+        dropped_inputs = inputs_mask * inputs
+        dropped_hidden_state = hidden_state_mask * hidden_state
+        
         # Content
         if self.architecture.content.has_transformation:
             if self.architecture.content.has_state:
-                content_args = torch.cat([inputs, hidden_state], -1)
+                content_args = torch.cat([dropped_inputs, dropped_hidden_state], -1)
             else:
-                content_args = inputs
+                content_args = dropped_inputs
             content = torch.mm(content_args, self.w_content)
         else:
-            content = inputs
+            content = inputs # TODO Should this be dropped out? Technically, the dropout is for the matrices.
         if self.architecture.content.has_bias:
             content = content + self.b_content
         if self.architecture.content.has_tanh:
@@ -123,11 +130,11 @@ class Cell(nn.Module):
         if self.architecture.gates.has_transformation:
             args = []
             if self.architecture.gates.is_state_arg:
-                args.append(hidden_state)
+                args.append(dropped_hidden_state)
             if self.architecture.gates.is_content_arg:
-                args.append(content)
+                args.append(content) # TODO Should this be dropped out?
             if self.architecture.gates.is_input_arg:
-                args.append(inputs)
+                args.append(dropped_inputs)
             gates = torch.mm(torch.cat(args, -1), self.w_gates) + self.b_gates
         else:
             gates = self.b_gates
@@ -145,6 +152,7 @@ class Cell(nn.Module):
             if self.architecture.gates.has_highway:
                 new_cell_state += gates[2] * inputs
             output = new_hidden_state = new_cell_state
+            output = output_mask * output # TODO This is different because it includes the highway
         # Sigmoid
         else:
             gates = torch.split(F.sigmoid(gates), self.hidden_size, -1)
@@ -160,8 +168,9 @@ class Cell(nn.Module):
             if self.architecture.gates.has_zero_gate:
                 new_hidden_state = gates[0] * new_hidden_state
             output = new_hidden_state
+            output = output_mask * output # TODO This is different because it includes the highway
             if self.architecture.gates.has_highway:
-                output = gates[-1] * new_hidden_state
+                output = gates[-1] * output + (1 - gates[-1]) * inputs
         
         return output, (new_hidden_state, new_cell_state)
 
