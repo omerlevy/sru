@@ -30,3 +30,7 @@ nohup ./run.sh 2 1 Wxhb sib-sig-tanhsczi &
 nohup ./run.sh 2 2 Wxhb sib-sig-tanhsczi &
 nohup ./run.sh 2 3 Wxhb sib-sig-tanhsczi &
 nohup ./run.sh 2 4 Wxhb sib-sig-tanhsczi &
+nohup ./run.sh 2 1 x sib-sig-tanhsczi &
+nohup ./run.sh 2 2 x sib-sig-tanhsczi &
+nohup ./run.sh 2 3 x sib-sig-tanhsczi &
+nohup ./run.sh 2 4 x sib-sig-tanhsczi &
