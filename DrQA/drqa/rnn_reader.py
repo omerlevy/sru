@@ -7,6 +7,10 @@ import torch
 import torch.nn as nn
 from . import layers
 
+import sys
+sys.path.append('../')
+from omernn import Architecture
+
 # Modification: add 'pos' and 'ner' features.
 # Origin: https://github.com/facebookresearch/ParlAI/tree/master/parlai/agents/drqa
 
@@ -76,7 +80,7 @@ class RnnDocReader(nn.Module):
             dropout_rate=opt['dropout_rnn'],
             dropout_output=opt['dropout_rnn_output'],
             concat_layers=opt['concat_rnn_layers'],
-            rnn_type=self.RNN_TYPES[opt['rnn_type']],
+            architecture=Architecture(opt['content'], opt['gates']),
             padding=opt['rnn_padding'],
         )
 
@@ -88,7 +92,7 @@ class RnnDocReader(nn.Module):
             dropout_rate=opt['dropout_rnn'],
             dropout_output=opt['dropout_rnn_output'],
             concat_layers=opt['concat_rnn_layers'],
-            rnn_type=self.RNN_TYPES[opt['rnn_type']],
+            architecture=Architecture(opt['content'], opt['gates']),
             padding=opt['rnn_padding'],
         )
 

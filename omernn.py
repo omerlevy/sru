@@ -17,8 +17,8 @@ class Contextualizer(nn.Module):
         self.architecture = architecture
         self.tanh_input = tanh_input
         if bidirectional:
-            raise Exception('Not implemented yet')
-            #self.cells = [(Cell(dims[layer], dims[layer+1], architecture).cuda(), Cell(dims[layer], dims[layer+1], architecture).cuda()) for layer in range(len(dims) - 1)]
+            self.forward_cells = nn.ModuleList([Cell(dims[layer], dims[layer+1], architecture).cuda() for layer in range(len(dims) - 1)])
+            self.backward_cells = nn.ModuleList([Cell(dims[layer], dims[layer+1], architecture).cuda() for layer in range(len(dims) - 1)])
         else:
             self.cells = nn.ModuleList([Cell(dims[layer], dims[layer+1], architecture).cuda() for layer in range(len(dims) - 1)])
         
@@ -26,17 +26,26 @@ class Contextualizer(nn.Module):
         inputs = inputs.cuda()
         if self.tanh_input:
             inputs = F.tanh(inputs)
+        
         if self.bidirectional:
-            raise Exception('Not implemented yet')
-        else:
-            new_states = []
-            for cell, state in zip(self.cells, states):
-                outputs, state = self.iterate(cell, inputs, state)
-                new_states.append(state)
-                inputs = outputs
+            forward_states, backward_states = states
+            forward_outputs, new_forward_states = self.iterate_layers(self.forward_cells, inputs, forward_states)
+            backward_outputs, new_backward_states = self.iterate_layers(self.backward_cells, self.flip(inputs, 0), backward_states)
+            outputs = torch.cat([forward_outputs, self.flip(backward_outputs, 0)], dim=-1)
+            new_states = (new_forward_states, new_backward_states)
             return outputs, new_states
-    
-    def iterate(self, cell, inputs, state):
+        else:
+            return self.iterate_layers(self.cells, inputs, states)
+
+    def iterate_layers(self, cells, inputs, states):
+        new_states = []
+        for cell, state in zip(cells, states):
+            outputs, state = self.iterate_time_step(cell, inputs, state)
+            new_states.append(state)
+            inputs = outputs
+        return outputs, new_states
+
+    def iterate_time_step(self, cell, inputs, state):
         batch_size = inputs.size()[1]
         inputs_mask = self.rnn_dropout(Variable(torch.ones([batch_size, cell.input_size]).cuda()))
         hidden_state_mask = self.rnn_dropout(Variable(torch.ones([batch_size, cell.hidden_size]).cuda())) 
@@ -49,16 +58,21 @@ class Contextualizer(nn.Module):
         return torch.stack(outputs, 0), state
     
     def init_hidden(self, batch_size):
+        zeros = [self.zeros(batch_size, dim) for dim in self.dims[1:]]
         if self.bidirectional:
-            return [(self.zeros(batch_size, dim), self.zeros(batch_size, dim)) for dim in self.dims[1:]]
+            return (zeros, zeros)
         else:
-            return [self.zeros(batch_size, dim) for dim in self.dims[1:]]
+            return zeros
     
     def zeros(self, batch_size, dim):
         if self.architecture.dual_state():
             return Variable(torch.zeros(batch_size, dim).cuda()), Variable(torch.zeros(batch_size, dim).cuda())
         else:
             return Variable(torch.zeros(batch_size, dim).cuda())
+
+    def flip(self, x, dim):
+        dim = x.dim() + dim if dim < 0 else dim
+        return x[tuple(slice(None, None) if i != dim else torch.arange(x.size(i)-1, -1, -1).long().cuda() for i in range(x.dim()))]
 
 
 class Cell(nn.Module):
@@ -125,7 +139,7 @@ class Cell(nn.Module):
             content = content + self.b_content
         if self.architecture.content.has_tanh:
             content = F.tanh(content)
-        
+
         # Gates - Computation
         if self.architecture.gates.has_transformation:
             args = []
@@ -149,7 +163,7 @@ class Cell(nn.Module):
             gates = [torch.unsqueeze(gate, -1) for gate in torch.split(gates, 1, -1)]
             
             new_cell_state = gates[0] * cell_state + gates[1] * content
-            if self.architecture.gates.has_highway:
+            if self.architecture.gates.has_highway and self.input_size == self.hidden_size:
                 new_cell_state += gates[2] * inputs
             output = new_hidden_state = new_cell_state
             output = output_mask * output # TODO This is different because it includes the highway
@@ -169,7 +183,7 @@ class Cell(nn.Module):
                 new_hidden_state = gates[0] * new_hidden_state
             output = new_hidden_state
             output = output_mask * output # TODO This is different because it includes the highway
-            if self.architecture.gates.has_highway:
+            if self.architecture.gates.has_highway and self.input_size == self.hidden_size:
                 output = gates[-1] * output + (1 - gates[-1]) * inputs
         
         return output, (new_hidden_state, new_cell_state)

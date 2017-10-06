@@ -87,6 +87,8 @@ parser.add_argument('--dropout_rnn_output', type=str2bool, nargs='?',
 parser.add_argument('--max_len', type=int, default=15)
 parser.add_argument('--rnn_type', default='lstm',
                     help='supported types: rnn, gru, lstm')
+parser.add_argument('--content', default='tanhWxhb')
+parser.add_argument('--gates', default='sib-sig-tanhsczi')
 
 args = parser.parse_args()
 
